@@ -1,0 +1,425 @@
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+  # S3 Bucket for storing SDA Data
+  SDABucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: sda-bucket
+
+  ExtractSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties: 
+      TopicName: extractTopic  
+  
+  ExtractSNSSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn:
+      - ExtractQueue
+      - ExtractSNSTopic
+    Properties:
+      Endpoint: !GetAtt ExtractQueue.Arn
+      Protocol: sqs
+      RawMessageDelivery: 'true'
+      TopicArn: !Ref ExtractSNSTopic
+
+  NotifySNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: notifyTopic
+      Subscription:
+        - Endpoint: "hr744527@dal.ca"
+          Protocol: email
+
+  ExtractQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: extractqueue
+  
+  ExtractQueuePolicy:
+    Type: 'AWS::SQS::QueuePolicy'
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - 'sqs:SendMessage'
+            Resource: '*'
+            Condition:
+              ArnEquals:
+                'aws:SourceArn': !Ref ExtractSNSTopic
+      Queues:
+        - !Ref ExtractQueue
+    DependsOn:
+      - ExtractSNSTopic
+
+  ExtractorLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Role: 'arn:aws:iam::119465344071:role/LabRole'
+      FunctionName: extractor
+      Runtime: python3.9
+      PackageType: Zip
+      Code:
+        ZipFile: |
+          import json
+          import base64
+          import traceback
+          import boto3
+
+          s3 = boto3.client('s3')
+          bucket_name = 'sda-bucket'
+
+          headers = {
+                      'Access-Control-Allow-Headers': '*',
+                      'Access-Control-Allow-Origin': '*',
+                      'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                  }
+
+          def lambda_handler(event, context):
+            try:
+                image_data_base64 = event['body']
+                image_data = base64.b64decode(image_data_base64)
+                
+                
+                query_params = event['queryStringParameters']
+                bannerId = query_params.get('bannerId')
+                assignment_no = query_params.get('assignment')
+                object_name = bannerId+'/' + 'assignment_'+assignment_no+'.jpg'
+                
+                
+                s3.put_object(Bucket=bucket_name, Key=object_name, Body=image_data)
+                
+                resp = {
+                    "key": {'DataType': 'String', 'StringValue': object_name}
+                }
+                
+                # Created Sns client
+                sns = boto3.client("sns")
+                name = "extractTopic"
+
+                topicArn = "arn:aws:sns:us-east-1:119465344071:extractTopic"
+                message = "New SDA Arrived"
+                
+                try:
+                    response = sns.publish(
+                        TopicArn=topicArn, Message=message, MessageAttributes=resp)
+                    message_id = response['MessageId']
+
+                except ClientError as e:
+                    return {
+                        'statusCode': 400,
+                        'headers':headers,
+                        'body': json.dumps(str(e))
+                    }
+                    
+                print("request before error")
+                return {
+                    'statusCode': 200,
+                    'headers': headers,
+                    'body': json.dumps('File uploaded successfully')
+                }
+            except Exception as e:
+                print(traceback.format_exc())
+                return {
+                    'statusCode': 400,
+                    'headers':headers,
+                    'body': json.dumps(str(e))
+                }
+      Handler: index.lambda_handler
+  
+  ExtractorInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-05548f9cecf47b442
+      SecurityGroups:
+        - !Ref ExtractorSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install docker -y
+          service docker start
+          usermod -a -G docker ec2-user
+          chkconfig docker on
+      KeyName: ExtractKeyPair
+
+
+  # Security Group for Weather Forecast Instance
+  ExtractorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for main app
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        
+
+
+  ExtractAPI:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: Extract
+  ExtractAPIResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref ExtractAPI
+      ParentId: !GetAtt 
+        - ExtractAPI
+        - RootResourceId
+      PathPart: extract
+    DependsOn:
+      - ExtractAPI
+  ExtractMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref ExtractAPI
+      ResourceId: !Ref ExtractAPIResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+      Integration:
+        Type: AWS_PROXY
+        IntegrationResponses:
+          - StatusCode: 200
+        IntegrationHttpMethod: POST
+        Uri: !Sub 
+          - >-
+            arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !GetAtt 
+              - ExtractorLambda
+              - Arn
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: $input.json('$')
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: $input.json('$')
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: '200'
+    DependsOn:
+      - ExtractAPIResource
+      - ExtractorLambda
+
+  APIGatewayDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Ref ExtractAPI
+      StageName: dev
+    DependsOn:
+      - ExtractMethod
+  APIGatewayCreateSubscriberPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref ExtractorLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub >-
+        arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ExtractAPI}/*/POST/extract
+    DependsOn:
+      - APIGatewayDeployment
+
+  TextractLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Role: 'arn:aws:iam::119465344071:role/LabRole'
+      FunctionName: textractor
+      Runtime: python3.9
+      PackageType: Zip
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import traceback
+
+          def lambda_handler(event, context):
+              try:
+                  sns = boto3.client("sns")
+                  topicArn = "arn:aws:sns:us-east-1:119465344071:notifyTopic"
+
+                  # Check if any messages are present
+                  if 'Records' in event:
+                      message = event['Records'][0]
+                      message_attributes = message['messageAttributes']
+                      receipt_handle = message['receiptHandle']
+                      key = message_attributes['key']['stringValue']
+                      print("S3 key message ", key)
+                      response = get_s3_object_content(key)
+                      print("response ", response)
+                      message = ""
+                      if response:
+                          if response['Signature'] == False:
+                              email_msg = ""
+                              for key, value in response.items():
+                                  email_msg = email_msg + str(key)+" : "+ str(value) + "\n "
+                              
+                              message = "Please fill following fields and resubmit your SDA \n\n"+email_msg
+                          else:
+                              message = "You have successfully submitted your SDA \n\n"
+                          data = {"default": message}
+                          response = sns.publish(
+                              TopicArn=topicArn, Message=json.dumps(data), MessageStructure="json")
+
+                          message_id = response['MessageId']
+
+                          print("message_id", message_id)
+
+                          print('Email Sent Successfully!')
+                          return {
+                              'statusCode': 200,
+                              'body': json.dumps('Email Sent Successfully!')
+                          }
+                      else:
+                          return {
+                              'statusCode': 400,
+                              'body': json.dumps('Something went wrong')
+                          }
+                  else:
+                      print("No messages found in the SQS queue.")
+                      return {
+                              'statusCode': 200,
+                              'body': json.dumps('No messages found in the SQS queue.')
+                          }
+                  
+              except Exception as e:
+                  print(traceback.format_exc())
+                  return {
+                              'statusCode': 400,
+                              'body': json.dumps(str(e))
+                          }
+              
+
+          def extract(image_bytes):
+              try:
+                  signature = []
+                  key_value = {}
+                  
+                  textract_client = boto3.client('textract')
+
+                  # Call Textract to detect text in the image
+                  response = textract_client.analyze_document(Document={'Bytes':image_bytes},FeatureTypes=['FORMS','SIGNATURES'])
+                  
+                  print("type ", type(response))
+                  for block in response['Blocks']:
+                      if block['BlockType'] == 'SIGNATURE':
+                          signature.append(block)
+                      if block['BlockType'] == 'KEY_VALUE_SET':
+                          form_key = ""
+                          form_value = ""
+                          if block['EntityTypes'][0] == 'KEY':
+                              for relationship in block['Relationships']:
+                                  key = []
+                                  value = []
+                                  print("relationship ", relationship)
+                                  if relationship['Type'] == 'CHILD':
+                                      for child_id in relationship['Ids']:
+                                          for b in response['Blocks']:
+                                              if b['Id'] == child_id:
+                                                  key.append(b['Text'])
+                                                  print("key text ", b['Text'])
+                                      form_key = ' '.join(key)
+                                  if relationship['Type'] == 'VALUE':
+                                      child_id = relationship['Ids'][0]
+                                      print("child id", child_id)
+                                      for value_block in response['Blocks']: 
+                                          if value_block['Id'] == child_id:
+                                              print("value block ", value_block)
+                                              for child_rel in value_block.get('Relationships',[]):
+                                                  if child_rel['Type'] == 'CHILD':
+                                                      for child in child_rel['Ids']:
+                                                          print("child ", child)
+                                                          for b in response['Blocks']:
+                                                              if b['Id'] == child and b['BlockType'] == 'WORD':
+                                                                  print("value text ", b['Text'])
+                                                                  value.append(b['Text'])
+                                      form_value = ' '.join(value)
+
+                          # If both key and value are available, add them to the forms_data list
+                          if form_key or form_value:
+                              key_value[form_key] = form_value
+
+                  # with open(file_path, 'w') as file:
+                  #     json.dump(response, file)
+                  response = {}
+                  if len(signature) > 0:
+                      response['Signature'] = True
+                  else:
+                      response['Signature'] = False
+
+                  for key, value in key_value.items():
+                      if value == '' or value == None:
+                          response[key] = value
+                  return response
+              except Exception as e:
+                  print(traceback.format_exc())
+                  print(e)
+                  return None
+                  
+          def get_s3_object_content(key):
+              # Initialize the S3 client
+              s3 = boto3.client('s3')
+              bucket_name = 'sda-bucket'
+
+              try:
+                  # Get the object content
+                  response = s3.get_object(Bucket=bucket_name, Key=key)
+
+                  # Read and decode the content of the object
+                  object_content = response['Body'].read()
+
+                  response = extract(object_content)
+
+                  return response
+
+              except Exception as e:
+                  return None
+
+      Handler: index.lambda_handler
+      Timeout: 30
+
+  # TextractEventRule:
+  #   Type: AWS::Events::Rule
+  #   Properties:
+  #     Name: textractRule
+  #     ScheduleExpression: rate(1 minute)  # Trigger the rule every 1 minute
+  #     State: ENABLED
+  #     Targets:
+  #       - Arn: !GetAtt TextractLambda.Arn
+  #         Id: TargetlambdaFunction
+
+  TextractLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TextractLambda
+      Principal: sqs.amazonaws.com
+      SourceArn: !GetAtt ExtractQueue.Arn
+
+  TextractEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    DependsOn: TextractLambdaPermission
+    Properties:
+      BatchSize: 1
+      EventSourceArn: !GetAtt ExtractQueue.Arn
+      FunctionName: !Ref TextractLambda

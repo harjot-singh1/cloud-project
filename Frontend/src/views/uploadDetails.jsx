@@ -114,7 +114,7 @@ function UploadDetails() {
           setImageBytecode(imageBytecode);
           // Here, 'imageBytecode' contains the encoded image data
           // Here, 'imageBytecode' contains the encoded image data
-          const apiUrl = "https://ybqd36o05j.execute-api.us-east-1.amazonaws.com/dev/extract";
+          const apiUrl = "https://eonbk8y322.execute-api.us-east-1.amazonaws.com/dev/extract";
 
           // Query string parameters
           const params = {
