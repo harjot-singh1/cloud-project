@@ -1,0 +1,499 @@
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+  postsTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: posts
+      AttributeDefinitions:
+        - AttributeName: post
+          AttributeType: S
+      KeySchema:
+        - AttributeName: post
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: '5'
+        WriteCapacityUnits: '5'
+  subscribersTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: subscribers
+      AttributeDefinitions:
+        - AttributeName: subscriber
+          AttributeType: S
+      KeySchema:
+        - AttributeName: subscriber
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: '5'
+        WriteCapacityUnits: '5'  
+  ReadAllSubscribersLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Role: 'arn:aws:iam::991168581972:role/LabRole'
+      FunctionName: ReadAllSubscribers
+      Runtime: python3.9
+      PackageType: Zip
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          def lambda_handler(event, context):
+            client = boto3.resource("dynamodb")
+            table = client.Table("subscribers")
+            response = table.scan()
+            return {
+                "statusCode": response["ResponseMetadata"]["HTTPStatusCode"],
+                "body": response['Items'],
+            }
+      Handler: index.lambda_handler   
+  CreateSubscriberLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Role: 'arn:aws:iam::991168581972:role/LabRole'
+      FunctionName: CreateSubscriber
+      Runtime: python3.9
+      PackageType: Zip
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          def lambda_handler(event, context):
+              dynamoClient = boto3.resource("dynamodb")
+              snsClient = boto3.client("sns")
+              table = dynamoClient.Table("subscribers")
+              response = table.put_item(
+                  Item={
+                      "subscriber": event["subscriber"],
+                  }
+              )
+              if response["ResponseMetadata"]["HTTPStatusCode"] == 200:
+                snsClient.subscribe(
+                  TopicArn="arn:aws:sns:us-east-1:991168581972:newPostNotification",
+                  Protocol="email",
+                  Endpoint=event["subscriber"])
+                return {
+                    "statusCode": response["ResponseMetadata"]["HTTPStatusCode"],
+                    "body": json.dumps("Subscriber Added"),
+                  }
+      Handler: index.lambda_handler
+  ReadAllLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Role: 'arn:aws:iam::991168581972:role/LabRole'
+      FunctionName: ReadAllPosts
+      Runtime: python3.9
+      PackageType: Zip
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          def lambda_handler(event, context):
+            client = boto3.resource("dynamodb")
+            table = client.Table("posts")
+            response = table.scan()
+            return {
+                "statusCode": response["ResponseMetadata"]["HTTPStatusCode"],
+                "body": response['Items'],
+            }
+      Handler: index.lambda_handler
+  ReadByIdLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Role: 'arn:aws:iam::991168581972:role/LabRole'
+      FunctionName: ReadPostByID
+      Runtime: python3.9
+      PackageType: Zip
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          def lambda_handler(event, context):
+              client = boto3.resource("dynamodb")
+              table = client.Table("posts")
+              response = table.get_item(Key={"postID": event["pathParameters"]["id"]})
+              return {
+                  "statusCode": response["ResponseMetadata"]["HTTPStatusCode"],
+                  "body": json.dumps(response["Item"]),
+              }
+      Handler: index.lambda_handler
+  CreateLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Role: 'arn:aws:iam::991168581972:role/LabRole'
+      FunctionName: CreatePost
+      Runtime: python3.9
+      PackageType: Zip
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          def lambda_handler(event, context):
+              dynamoClient = boto3.resource("dynamodb")
+              snsClient = boto3.client("sns")
+              table = dynamoClient.Table("posts")
+              response = table.put_item(
+                  Item={
+                      "post": event["post"],
+                      "body": event["body"],
+                      "imageURL": event["imageURL"],
+                  }
+              )
+              if response["ResponseMetadata"]["HTTPStatusCode"] == 200:
+                  snsClient.publish(
+                      TopicArn="arn:aws:sns:us-east-1:991168581972:newPostNotification",
+                      Subject="This week's newsletter!",
+                      Message=json.dumps({"default": json.dumps(event["post"]+" . Visit our website for more content!")}),
+                      MessageStructure="json",
+                  )
+              return {
+                  "statusCode": response["ResponseMetadata"]["HTTPStatusCode"],
+                  "body": json.dumps("Post Added"),
+              }
+
+      Handler: index.lambda_handler
+  DeleteLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Role: 'arn:aws:iam::991168581972:role/LabRole'
+      FunctionName: DeletePostByID
+      Runtime: python3.9
+      PackageType: Zip
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          def lambda_handler(event, context):
+              client = boto3.resource("dynamodb")
+              table = client.Table("posts")
+              response = table.delete_item(Key={"postID": event["pathParameters"]["id"]})
+              return {
+                  "statusCode": response["ResponseMetadata"]["HTTPStatusCode"],
+                  "headers": {"content-type": "application/json"},
+                  "body": json.dumps("Post Deleted"),
+              }
+      Handler: index.lambda_handler
+  newsletterSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties: 
+      TopicName: newPostNotification
+  postsAPI:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: Posts API
+  subscribersAPIResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref postsAPI
+      ParentId: !GetAtt 
+        - postsAPI
+        - RootResourceId
+      PathPart: subscribers
+    DependsOn:
+      - postsAPI
+  getAllSubscribersMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref postsAPI
+      ResourceId: !Ref subscribersAPIResource
+      HttpMethod: GET
+      OperationName: getSubscribers
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+      Integration:
+        Type: AWS
+        IntegrationResponses:
+          - StatusCode: 200
+        IntegrationHttpMethod: POST
+        Uri: !Sub 
+          - >-
+            arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !GetAtt 
+              - ReadAllSubscribersLambda
+              - Arn
+    DependsOn:
+      - subscribersAPIResource
+      - ReadAllSubscribersLambda
+  createSubscriberMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref postsAPI
+      ResourceId: !Ref subscribersAPIResource
+      HttpMethod: POST
+      OperationName: createSubscriber
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+      Integration:
+        Type: AWS
+        IntegrationResponses:
+          - StatusCode: 200
+        IntegrationHttpMethod: POST
+        Uri: !Sub 
+          - >-
+            arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !GetAtt 
+              - CreateSubscriberLambda
+              - Arn
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: $input.json('$')
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: $input.json('$')
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: '200'
+    DependsOn:
+      - subscribersAPIResource
+      - CreateSubscriberLambda
+  subscribersResourceOptionMethod:
+      Type: "AWS::ApiGateway::Method"
+      Properties:
+        ResourceId: !Ref subscribersAPIResource
+        RestApiId: !Ref postsAPI
+        AuthorizationType: NONE
+        HttpMethod: OPTIONS
+        Integration:
+          Type: MOCK
+          IntegrationResponses:
+            - ResponseParameters:
+                method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+                method.response.header.Access-Control-Allow-Origin: "'*'"
+              ResponseTemplates:
+                application/json: ''
+              StatusCode: '200'
+          PassthroughBehavior: NEVER
+          RequestTemplates:
+            application/json: '{"statusCode": 200}'
+        MethodResponses:
+          - ResponseModels:
+              application/json: Empty
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: true
+              method.response.header.Access-Control-Allow-Methods: true
+              method.response.header.Access-Control-Allow-Origin: true
+            StatusCode: '200'
+      DependsOn:
+      - subscribersAPIResource
+  postsAPIResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref postsAPI
+      ParentId: !GetAtt 
+        - postsAPI
+        - RootResourceId
+      PathPart: posts
+    DependsOn:
+      - postsAPI
+  getAllPostsMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref postsAPI
+      ResourceId: !Ref postsAPIResource
+      HttpMethod: GET
+      OperationName: getPosts
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+      Integration:
+        Type: AWS
+        IntegrationResponses:
+          - StatusCode: 200
+        IntegrationHttpMethod: POST
+        Uri: !Sub 
+          - >-
+            arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !GetAtt 
+              - ReadAllLambda
+              - Arn
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: $input.json('$')
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: $input.json('$')
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: '200'
+    DependsOn:
+      - postsAPIResource
+      - ReadAllLambda
+  createPostsMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref postsAPI
+      ResourceId: !Ref postsAPIResource
+      HttpMethod: POST
+      OperationName: createPosts
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub 
+          - >-
+            arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !GetAtt 
+              - CreateLambda
+              - Arn
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: $input.json('$')
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: $input.json('$')
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: '200'
+    DependsOn:
+      - postsAPIResource
+      - CreateLambda
+  postsResourceOptionMethod:
+      Type: "AWS::ApiGateway::Method"
+      Properties:
+        ResourceId: !Ref postsAPIResource
+        RestApiId: !Ref postsAPI
+        AuthorizationType: NONE
+        HttpMethod: OPTIONS
+        Integration:
+          Type: MOCK
+          IntegrationResponses:
+            - ResponseParameters:
+                method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+                method.response.header.Access-Control-Allow-Origin: "'*'"
+              ResponseTemplates:
+                application/json: ''
+              StatusCode: '200'
+          PassthroughBehavior: NEVER
+          RequestTemplates:
+            application/json: '{"statusCode": 200}'
+        MethodResponses:
+          - ResponseModels:
+              application/json: Empty
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: true
+              method.response.header.Access-Control-Allow-Methods: true
+              method.response.header.Access-Control-Allow-Origin: true
+            StatusCode: '200'
+      DependsOn:
+      - postsAPIResource
+  postsIdAPIResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref postsAPI
+      ParentId: !Ref postsAPIResource
+      PathPart: '{id}'
+    DependsOn:
+      - postsAPIResource
+  getPostByIdMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref postsAPI
+      ResourceId: !Ref postsIdAPIResource
+      HttpMethod: GET
+      OperationName: getPostById
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+      Integration:
+        Type: AWS_PROXY
+        IntegrationResponses:
+          - StatusCode: 200
+        IntegrationHttpMethod: POST
+        Uri: !Sub 
+          - >-
+            arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !GetAtt 
+              - ReadByIdLambda
+              - Arn
+    DependsOn:
+      - postsIdAPIResource
+      - ReadByIdLambda
+  APIGatewayDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Ref postsAPI
+      StageName: dev
+    DependsOn:
+      - getAllPostsMethod
+      - getPostByIdMethod
+      - createPostsMethod
+      - getAllSubscribersMethod
+      - createSubscriberMethod
+      - postsResourceOptionMethod
+      - subscribersResourceOptionMethod
+  APIGatewayReadAllSubscribersPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref ReadAllSubscribersLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub >-
+        arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${postsAPI}/*/GET/subscribers
+    DependsOn:
+      - APIGatewayDeployment
+  APIGatewayCreateSubscriberPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref CreateSubscriberLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub >-
+        arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${postsAPI}/*/POST/subscribers
+    DependsOn:
+      - APIGatewayDeployment
+  APIGatewayReadAllLambdaPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref ReadAllLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub >-
+        arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${postsAPI}/*/GET/posts
+    DependsOn:
+      - APIGatewayDeployment
+  APIGatewayCreateLambdaPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref CreateLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub >-
+        arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${postsAPI}/*/POST/posts
+    DependsOn:
+      - APIGatewayDeployment
+  APIGatewayReadByIdLambdaPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref ReadByIdLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub >-
+        arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${postsAPI}/*/GET/posts/*
+    DependsOn:
+      - APIGatewayDeployment
